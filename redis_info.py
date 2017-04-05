@@ -32,6 +32,7 @@
 import collectd
 import socket
 import re
+import time
 
 # Verbose logging on/off. Override in config by specifying 'Verbose'.
 VERBOSE_LOGGING = False
@@ -182,7 +183,6 @@ def configure_callback(conf):
 
 def dispatch_value(info, key, type, plugin_instance=None, type_instance=None):
     """Read a key from info response data and dispatch a value"""
-
     if key not in info:
         collectd.warning('redis_info plugin: Info key not found: %s, Instance: %s' % (key, plugin_instance))
         return
@@ -208,6 +208,63 @@ def dispatch_value(info, key, type, plugin_instance=None, type_instance=None):
     val.values = [value]
     val.dispatch()
 
+def dispatch_hitrate(info, plugin_instance=None):
+    """Read the relevant keys from info response data and calculate hitrate"""
+    if plugin_instance is None:
+        plugin_instance = 'unknown redis'
+        collectd.error('redis_info plugin: plugin_instance is not set, Info key: %s' % key)
+
+    hits = float(info['keyspace_hits'])
+    misses = float(info['keyspace_misses'])
+
+    rate = hits / (hits + misses)
+    log_verbose('Sending value: %s=%s' % ('hitrate', rate))
+
+    val = collectd.Values(plugin='redis_info')
+    val.type = 'gauge'
+    val.type_instance = 'hitrate'
+    val.plugin_instance = plugin_instance
+    val.values = [rate]
+    val.dispatch()
+
+def dispatch_latency(info, conf, plugin_instance=None):
+    """Use redis ping-pong to determine latency, then report"""
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((conf['host'], conf['port']))
+        log_verbose('Connected to Redis at %s:%s' % (conf['host'], conf['port']))
+    except socket.error, e:
+        collectd.error('redis_info plugin: Error connecting to %s:%d - %r'
+                       % (conf['host'], conf['port'], e))
+        return None
+
+    fp = s.makefile('r')
+
+    if conf['auth'] is not None:
+        log_verbose('Sending auth command')
+        s.sendall('auth %s\r\n' % (conf['auth']))
+
+        status_line = fp.readline()
+        if not status_line.startswith('+OK'):
+            # -ERR invalid password
+            # -ERR Client sent AUTH, but no password is set
+            collectd.error('redis_info plugin: Error sending auth to %s:%d - %r'
+                           % (conf['host'], conf['port'], status_line))
+            return None
+
+    log_verbose('Sending info command')
+    start_time = time.time()
+    s.sendall('PING\r\n')
+    fp.readline()
+    exec_time = time.time() - start_time
+
+    val = collectd.Values(plugin='redis_info')
+    val.type = 'gauge'
+    val.type_instance = 'latency'
+    val.plugin_instance = plugin_instance
+    val.values = [exec_time]
+    val.dispatch()
 
 def read_callback():
     for conf in CONFIGS:
@@ -232,6 +289,10 @@ def get_metrics(conf):
             dispatch_value(info, 'total_connections_received', 'counter', plugin_instance, 'connections_received')
         elif key == 'total_commands_processed' and val == 'counter':
             dispatch_value(info, 'total_commands_processed', 'counter', plugin_instance, 'commands_processed')
+        elif key == 'hitrate':
+            dispatch_hitrate(info, plugin_instance)
+        elif key == 'latency':
+            dispatch_latency(info, conf, plugin_instance)
         else:
             dispatch_value(info, key, val, plugin_instance)
 
