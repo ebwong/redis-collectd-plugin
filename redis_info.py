@@ -229,7 +229,6 @@ def dispatch_hitrate(info, plugin_instance=None):
 
 def dispatch_latency(info, conf, plugin_instance=None):
     """Use redis ping-pong to determine latency, then report"""
-
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((conf['host'], conf['port']))
@@ -253,11 +252,12 @@ def dispatch_latency(info, conf, plugin_instance=None):
                            % (conf['host'], conf['port'], status_line))
             return None
 
-    log_verbose('Sending info command')
+    log_verbose('Sending PING command')
     start_time = time.time()
     s.sendall('PING\r\n')
     fp.readline()
     exec_time = time.time() - start_time
+    s.close()
 
     val = collectd.Values(plugin='redis_info')
     val.type = 'gauge'
